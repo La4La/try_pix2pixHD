@@ -33,10 +33,15 @@ class ResBlock(link.Chain):
         return h + x
 
 
-class GlobalNetwork(link.Chain):
-    def __init__(self, in_ch, norm):
-        super(GlobalNetwork, self).__init__()
+class GlobalGenerator(link.Chain):
+    def __init__(self, in_ch=None, out_ch=3, ins_norm=False, input_size=(512, 1024), num_resblock=9):
+        super(GlobalGenerator, self).__init__()
         with self.init_scope():
+            self.num_resblock = num_resblock
+            if ins_norm:
+                norm = InstanceNormalization
+            else:
+                norm = BatchNormalization
             self.flat1 = Convolution2D(in_ch, 64, 7, 1, 3, initialW=None, nobias=True)
             self.flat1_bn = norm(64)
             self.down1 = Convolution2D(64, 128, 3, 2, 1, initialW=None, nobias=True)
@@ -45,55 +50,31 @@ class GlobalNetwork(link.Chain):
             self.down2_bn = norm(256)
             self.down3 = Convolution2D(256, 512, 3, 2, 1, initialW=None, nobias=True)
             self.down3_bn = norm(512)
-            self.res1 = ResBlock(512, norm=norm)
-            self.res2 = ResBlock(512, norm=norm)
-            self.res3 = ResBlock(512, norm=norm)
-            self.res4 = ResBlock(512, norm=norm)
-            self.res5 = ResBlock(512, norm=norm)
-            self.res6 = ResBlock(512, norm=norm)
-            self.res7 = ResBlock(512, norm=norm)
-            self.res8 = ResBlock(512, norm=norm)
-            self.res9 = ResBlock(512, norm=norm)
-            self.up1 = Deconvolution2D(512, 256, 4, 2, 1, initialW=None, nobias=True)
+            self.down4 = Convolution2D(512, 1024, 3, 2, 1, initialW=None, nobias=True)
+            self.down4_bn = norm(1024)
+            for i in range(self.num_resblock):
+                self.add_link('res_{}'.format(i), ResBlock(1024, norm=norm))
+            self.up0 = Deconvolution2D(1024, 512, 3, 2, 1, initialW=None, nobias=True, outsize=[int(x / 8) for x in input_size])
+            self.up0_bn = norm(512)
+            self.up1 = Deconvolution2D(512, 256, 3, 2, 1, initialW=None, nobias=True, outsize=[int(x / 4) for x in input_size])
             self.up1_bn = norm(256)
-            self.up2 = Deconvolution2D(256, 128, 4, 2, 1, initialW=None, nobias=True)
+            self.up2 = Deconvolution2D(256, 128, 3, 2, 1, initialW=None, nobias=True, outsize=[int(x / 2) for x in input_size])
             self.up2_bn = norm(128)
-            self.up3 = Deconvolution2D(128, 64, 4, 2, 1, initialW=None, nobias=True)
+            self.up3 = Deconvolution2D(128, 64, 3, 2, 1, initialW=None, nobias=True, outsize=input_size)
             self.up3_bn = norm(64)
+            self.flat2 = Convolution2D(64, out_ch, 7, 1, 3, initialW=None, nobias=True)
     def __call__(self, x):
         h = relu(self.flat1_bn(self.flat1(x)))
         h = relu(self.down1_bn(self.down1(h)))
         h = relu(self.down2_bn(self.down2(h)))
         h = relu(self.down3_bn(self.down3(h)))
-        h = relu(self.res1(h))
-        h = relu(self.res2(h))
-        h = relu(self.res3(h))
-        h = relu(self.res3(h))
-        h = relu(self.res4(h))
-        h = relu(self.res5(h))
-        h = relu(self.res6(h))
-        h = relu(self.res7(h))
-        h = relu(self.res8(h))
-        h = relu(self.res9(h))
+        h = relu(self.down4_bn(self.down4(h)))
+        for i in range(self.num_resblock):
+            h = self['res_{}'.format(i)](h)
+        h = relu(self.up0_bn(self.up0(h)))
         h = relu(self.up1_bn(self.up1(h)))
         h = relu(self.up2_bn(self.up2(h)))
         h = relu(self.up3_bn(self.up3(h)))
-        return h
-
-
-class GlobalGenerator(link.Chain):
-    def __init__(self, in_ch=36, out_ch=3, ins_norm=False):
-        super(GlobalGenerator, self).__init__()
-        with self.init_scope():
-            if ins_norm:
-                norm = InstanceNormalization
-            else:
-                norm = BatchNormalization
-            self.global_network = GlobalNetwork(in_ch, norm=norm)
-            self.flat2 = Convolution2D(64, out_ch, 7, 1, 3, initialW=None, nobias=True)
-    def __call__(self, x):
-        h = self.global_network(x)
-        # out = tanh(self.flat2(h))
         out = self.flat2(h)
         return out
 
@@ -138,26 +119,27 @@ class LocalEnhancer(link.Chain):
         return h
 
 class Discriminator(link.Chain):
-    def __init__(self, in_ch, wscale=0.02, getIntermFeat=True, SNGAN=True):
+    def __init__(self, in_ch, wscale=0.02, getIntermFeat=True, conv = Convolution2D):
         self.getIntermFeat = getIntermFeat
         w= chainer.initializers.Normal(wscale)
         super(Discriminator, self).__init__()
-        if SNGAN:
-            conv = SNConvolution2D
-        else:
-            conv = Convolution2D
-        # notice: receptive field is a little bit smaller than 70*70
+        kw = 4
+        pad = int(np.ceil((kw - 1.0) / 2))
         with self.init_scope():
-            self.c1 = conv(in_ch, 64, 4, 2, 1, initialW=w)
-            self.c2 = conv(64, 128, 4, 2, 1, initialW=w)
-            self.c3 = conv(128, 256, 4, 2, 1, initialW=w)
-            self.c4 = conv(256, 512, 4, 1, 1, initialW=w)
-            self.c5 = conv(512, 1, 4, 1, 1, initialW=w)
+            self.c1 = conv(in_ch, 64, 4, 2, pad, initialW=w)
+            self.c2 = conv(64, 128, 4, 2, pad, initialW=w)
+            self.c3 = conv(128, 256, 4, 2, pad, initialW=w)
+            self.c4 = conv(256, 512, 4, 1, pad, initialW=w)
+            self.c5 = conv(512, 1, 4, 1, pad, initialW=w)
+            self.bn0 = BatchNormalization(64)
+            self.bn1 = BatchNormalization(128)
+            self.bn2 = BatchNormalization(256)
+            self.bn3 = BatchNormalization(512)
     def __call__(self, x):
         h1 = leaky_relu(self.c1(x))
-        h2 = leaky_relu(self.c2(h1))
-        h3 = leaky_relu(self.c3(h2))
-        h4 = leaky_relu(self.c4(h3))
+        h2 = leaky_relu(self.bn1(self.c2(h1)))
+        h3 = leaky_relu(self.bn2(self.c3(h2)))
+        h4 = leaky_relu(self.bn3(self.c4(h3)))
         h5 = leaky_relu(self.c5(h4))
         if self.getIntermFeat:
             result = [h1, h2, h3, h4, h5]
@@ -166,12 +148,12 @@ class Discriminator(link.Chain):
         return result
 
 class MultiscaleDiscriminator(link.Chain):
-    def __init__(self, in_ch=39, SNGAN=True):
+    def __init__(self, in_ch=None, getIntermFeat=True):
         super(MultiscaleDiscriminator, self).__init__()
         with self.init_scope():
-            self.D1 = Discriminator(in_ch, SNGAN=SNGAN)
-            self.D2 = Discriminator(in_ch, SNGAN=SNGAN)
-            self.D3 = Discriminator(in_ch, SNGAN=SNGAN)
+            self.D1 = Discriminator(in_ch, getIntermFeat=getIntermFeat)
+            self.D2 = Discriminator(in_ch, getIntermFeat=getIntermFeat)
+            self.D3 = Discriminator(in_ch, getIntermFeat=getIntermFeat)
     def __call__(self, x):
         h1 = self.D1(x)
         x = average_pooling_2d(x, 3, 2, 1)
