@@ -5,14 +5,15 @@ import chainer
 import chainer.functions as F
 from chainer import Variable
 
-class GlobalUpdater(chainer.training.StandardUpdater):
+class Updater(chainer.training.StandardUpdater):
     def __init__(self, *args, **kwargs):
         self.gen, self.dis = kwargs.pop('models')
         self._iter = 0
         self.D_num = 3
         self.xp = self.gen.xp
         self.size = kwargs.pop('size')
-        super(GlobalUpdater, self).__init__(*args, **kwargs)
+        self.fix_global_num_epochs = kwargs.pop("fix_global_num_epochs", 0)
+        super(Updater, self).__init__(*args, **kwargs)
         self.label_true = []
         self.label_false = []
 
@@ -67,6 +68,12 @@ class GlobalUpdater(chainer.training.StandardUpdater):
 
         gen_optimizer = self.get_optimizer('gen')
         dis_optimizer = self.get_optimizer('dis')
+
+        if self.gen.__class__.__name__ == "LocalEnhancer":
+            if self.fix_global_num_epochs >= self.epoch:
+                self.gen.global_generator.disable_update()
+            else:
+                self.gen.global_generator.enable_update()
 
         gen_optimizer.update(self.loss_gen, self.gen, output, D_fake, D_real)
         output.unchain_backward()

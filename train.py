@@ -7,8 +7,8 @@ import argparse
 from chainer import optimizers, serializers, training
 from chainer.training import extensions
 
-from networks import GlobalGenerator, MultiscaleDiscriminator, Encoder
-from updater import GlobalUpdater
+from networks import GlobalGenerator, MultiscaleDiscriminator, LocalEnhancer
+from updater import Updater
 from dataset import Pix2PixHDDataset
 
 #chainer.cuda.set_max_workspace_size(1024 * 1024 * 1024)
@@ -22,7 +22,7 @@ def main():
     parser.add_argument('--epoch', '-e', type=int, default=200)
     parser.add_argument('--gpu', '-g', type=int, default=-1)
     parser.add_argument('--dataset', '-i', default="/mnt/sakuradata10-striped/gao/cityscapes")
-    parser.add_argument('--out', '-o', default='/mnt/sakuradata10-striped/gao/results/pix2pixHD_ins')
+    parser.add_argument('--out', '-o', default='/mnt/sakuradata10-striped/gao/results/pix2pixHD')
     parser.add_argument('--resume', '-r', default='')
     parser.add_argument('--snapshot_interval', type=int, default=10000)
     parser.add_argument('--display_interval', type=int, default=10)
@@ -32,6 +32,9 @@ def main():
     parser.add_argument('--vis_num', type=int, default=4)
     parser.add_argument('--vis_interval', type=int, default=100)
     parser.add_argument('--model_num', '-n', default='')
+    parser.add_argument('--generator', '-G', default='Global', choices=['Global', 'Local'])
+    parser.add_argument('--fix_global_num_epochs', type=int, default=10)
+    parser.add_argument('--global_model_path', default='')
     args = parser.parse_args()
 
     print('GPU: {}'.format(args.gpu))
@@ -41,11 +44,14 @@ def main():
 
     size = [args.size, args.size * 2]
 
-    gen = GlobalGenerator(ins_norm=args.ins_norm, input_size=size)
+    if args.generator == 'Global':
+        gen = GlobalGenerator(ins_norm=args.ins_norm, input_size=size)
+    else:
+        gen = LocalEnhancer(args.global_model_path, ins_norm=args.ins_norm, input_size=size)
     dis = MultiscaleDiscriminator()
     if args.model_num:
         chainer.serializers.load_npz(os.path.join(args.out, 'gen_iter_' + args.model_num + '.npz'), gen)
-        chainer.serializers.load_npz(os.path.join(args.out, 'gen_dis_iter_' + args.model_num + '.npz'), dis)
+        # chainer.serializers.load_npz(os.path.join(args.out, 'gen_dis_iter_' + args.model_num + '.npz'), dis)
 
     train = Pix2PixHDDataset(root=args.dataset, one_hot=args.no_one_hot, size=size)
     test = Pix2PixHDDataset(root=args.dataset, one_hot=args.no_one_hot, size=size, test=True)
@@ -64,12 +70,13 @@ def main():
     opt_d.setup(dis)
 
     # Set up a trainer
-    updater = GlobalUpdater(
+    updater = Updater(
         models=(gen, dis),
         iterator={'main': train_iter, 'test': test_iter},
         optimizer={'gen': opt, 'dis': opt_d},
         device=args.gpu,
-        size=size
+        size=size,
+        fix_global_num_epochs=args.fix_global_num_epochs
     )
 
     trainer = training.Trainer(updater, (args.epoch, 'epoch'), out=args.out)

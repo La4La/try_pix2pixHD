@@ -24,9 +24,9 @@ class ResBlock(link.Chain):
         super(ResBlock, self).__init__()
         with self.init_scope():
             self.conv1 = Convolution2D(ch, ch, 3, 1, 1, initialW=initialW, nobias=True)
-            self.bn1 = BatchNormalization(ch)
+            self.bn1 = norm(ch)
             self.conv2 = Convolution2D(ch, ch, 3, 1, 1, initialW=initialW, nobias=True)
-            self.bn2 = BatchNormalization(ch)
+            self.bn2 = norm(ch)
     def __call__(self, x):
         h = relu(self.bn1(self.conv1(x)))
         h = self.bn2(self.conv2(h))
@@ -63,7 +63,7 @@ class GlobalGenerator(link.Chain):
             self.up3 = Deconvolution2D(128, 64, 3, 2, 1, initialW=None, nobias=True, outsize=input_size)
             self.up3_bn = norm(64)
             self.flat2 = Convolution2D(64, out_ch, 7, 1, 3, initialW=None, nobias=True)
-    def __call__(self, x):
+    def __call__(self, x, get_global_feature=False):
         h = relu(self.flat1_bn(self.flat1(x)))
         h = relu(self.down1_bn(self.down1(h)))
         h = relu(self.down2_bn(self.down2(h)))
@@ -75,45 +75,47 @@ class GlobalGenerator(link.Chain):
         h = relu(self.up1_bn(self.up1(h)))
         h = relu(self.up2_bn(self.up2(h)))
         h = relu(self.up3_bn(self.up3(h)))
-        out = self.flat2(h)
-        return out
+        if get_global_feature:
+            return h
+        else:
+            out = tanh(self.flat2(h))
+            return out
 
 
 class LocalEnhancer(link.Chain):
-    def __init__(self, in_ch, out_ch, path_glb, path_loc, FineTune=False):
+    def __init__(self, path_glb, in_ch=None, out_ch=3, ins_norm=False, num_resblock=3, input_size=(512, 1024)):
         super(LocalEnhancer, self).__init__()
         with self.init_scope():
-            self.global_network = GlobalNetwork(in_ch)
+            self.global_network = GlobalGenerator(in_ch)
             serializers.load_npz(path_glb, self.global_network)
 
+            self.num_resblock = num_resblock
+            if ins_norm:
+                norm = InstanceNormalization
+            else:
+                norm = BatchNormalization
             self.flat1 = Convolution2D(in_ch, 32, 7, 1, 3)
-            self.flat1_bn = BatchNormalization(32)
+            self.flat1_bn = norm(32)
             self.down1 = Convolution2D(32, 64, 3, 2, 1)
-            self.down1_bn = BatchNormalization(64)
-            self.res1 = ResBlock(64)
-            self.res2 = ResBlock(64)
-            self.res3 = ResBlock(64)
-            self.up1 = Deconvolution2D(64, 32, 4, 2, 1)
-            self.up1_bn = BatchNormalization(32)
+            self.down1_bn = norm(64)
+            for i in range(self.num_resblock):
+                self.add_link('res_{}'.format(i), ResBlock(64, norm=norm))
+            self.up1 = Deconvolution2D(64, 32, 3, 2, 1, outsize=input_size)
+            self.up1_bn = norm(32)
             self.flat2 = Convolution2D(32, out_ch, 7, 1, 3)
-
-            self.FineTune = FineTune
 
     def __call__(self, x):
         h = relu(self.flat1_bn(self.flat1(x)))
         h = relu(self.down1_bn(self.down1(h)))
 
         x_downsampled = average_pooling_2d(x, 3, 2, 1)
-        if self.FineTune:
-            g = self.global_network(x_downsampled)
-        else:
-            with chainer.no_backprop_mode():
-                with chainer.using_config('train', False):
-                    g = self.global_network(x_downsampled)
+        with chainer.no_backprop_mode():
+            with chainer.using_config('train', False):
+                g = self.global_network(x_downsampled)
+                h = h + g
 
-        h = relu(self.res1(h + g))
-        h = relu(self.res2(h))
-        h = relu(self.res3(h))
+        for i in range(self.num_resblock):
+            h = self['res_{}'.format(i)](h)
         h = relu(self.up1_bn(self.up1(h)))
         h = tanh(self.flat2(h))
         return h
